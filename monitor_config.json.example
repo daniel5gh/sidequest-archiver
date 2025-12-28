@@ -1,0 +1,4 @@
+{
+  "app_ids": [123, 321, 456],
+  "storage_dir": "./apks"
+}

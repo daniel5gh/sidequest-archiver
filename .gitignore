@@ -1,0 +1,30 @@
+# APK archives
+/apks/
+
+# Test data
+/test-data/
+
+# Python virtual environments
+/venv-*/
+/.venv/
+
+# Log files
+*.log
+
+# Python bytecode
+*.pyc
+__pycache__/
+
+# Output and run artifacts
+run-*.txt
+
+# Local config (do not ignore example)
+monitor_config.json
+!monitor_config.json.example
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+.idea/
+.vscode/
