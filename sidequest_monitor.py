@@ -35,7 +35,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 # Use requests for HTTP; listed in requirements.txt
@@ -104,6 +104,40 @@ def slugify(s: str) -> str:
 def short_hash(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:12]
 
+# Atomic file write helper
+import tempfile
+import shutil
+
+def atomic_write_file(dest_path: str, writer, mode: str = "wb") -> None:
+    """
+    Atomically write to a file using a streaming approach.
+    Accepts a callback or context manager that receives a writable file object and streams data to it.
+    Args:
+        dest_path: Final file path.
+        writer: Callable[[file], None] or context manager yielding file. Writes data to the file object.
+        mode: File mode, 'wb' for binary, 'w' for text.
+    """
+    dest_dir = os.path.dirname(dest_path)
+    os.makedirs(dest_dir, exist_ok=True)
+    base_name = os.path.basename(dest_path)
+    fd, tmp_path = tempfile.mkstemp(prefix=base_name + ".", suffix=".tmp", dir=dest_dir)
+    try:
+        with os.fdopen(fd, mode) as f:
+            logger.debug(f"[atomic_write_file] Streaming write to temp file {tmp_path}")
+            writer(f)
+        logger.info(f"Atomic write: moving temp file {tmp_path} to {dest_path}")
+        if os.path.exists(dest_path):
+            logger.warning(f"Destination file {dest_path} already exists and will be replaced atomically")
+        os.replace(tmp_path, dest_path)
+        logger.info(f"Atomic move complete: {tmp_path} -> {dest_path}")
+    except Exception as e:
+        logger.error(f"Atomic write failed, cleaning up temp file: {tmp_path}")
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
+
 # Load or initialize index.json
 def load_index() -> Dict[str, List[Dict[str, Any]]]:
     if not os.path.exists(INDEX_PATH):
@@ -117,8 +151,10 @@ def load_index() -> Dict[str, List[Dict[str, Any]]]:
 
 def save_index(index: Dict[str, List[Dict[str, Any]]]) -> None:
     os.makedirs(APKS_DIR, exist_ok=True)
-    with open(INDEX_PATH, "w", encoding="utf-8") as f:
-        json.dump(index, f, indent=2, sort_keys=True)
+    # Use atomic_write_file for index.json (streaming)
+    def writer(f):
+        f.write(json.dumps(index, indent=2, sort_keys=True).encode("utf-8"))
+    atomic_write_file(INDEX_PATH, writer, mode="wb")
 
 # Hardcoded headers from provided curl example
 # These will be used for all Sidequest API and APK requests
@@ -249,62 +285,39 @@ def extract_apk_info(metadata: Dict[str, Any]) -> Optional[Dict[str, str]]:
 
 # Download helper
 def download_file(url: str, dest_path: str) -> None:
-   """
-   Download a file from the given URL to dest_path using a temporary file and atomic rename.
-   Ensures that incomplete downloads do not leave partial/corrupt files in the archive.
-   This is robust and cross-platform (Windows and Unix).
-   """
-   import tempfile
-   import shutil
-   # Ensure requests is available; the script previously required requests
-   if requests is None:
-       raise RuntimeError("requests library is required to download files")
-   os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-   logger.info("Downloading %s -> %s (using temp file for atomicity)", url, dest_path)
-   logger.debug("Download headers: %r", AGENT_HEADERS)
-   r = requests.get(url, stream=True, timeout=60, headers=AGENT_HEADERS)
-   logger.debug("HTTP status: %s", r.status_code)
-   logger.debug("HTTP response headers: %r", r.headers)
-   # Trace first 1024 bytes of content for debugging
-   first_bytes = b""
-   for chunk in r.iter_content(chunk_size=1024):
-       if chunk:
-           first_bytes += chunk
-           break
-   logger.debug("First 1024 bytes of response: %r", first_bytes)
-   r.raise_for_status()
-   # Use a temp file in the same directory for safe/atomic move
-   dest_dir = os.path.dirname(dest_path)
-   base_name = os.path.basename(dest_path)
-   fd, tmp_path = tempfile.mkstemp(prefix=base_name + ".", suffix=".tmp", dir=dest_dir)
-   try:
-       with os.fdopen(fd, "wb") as f:
-           f.write(first_bytes)
-           for chunk in r.iter_content(chunk_size=8192):
-               if chunk:
-                   f.write(chunk)
-       logger.debug("Download to temp file complete: %s", tmp_path)
-       # Atomically move temp file to final destination
-       if os.path.exists(dest_path):
-           logger.warning("Destination file %s already exists and will be replaced atomically", dest_path)
-       try:
-           os.replace(tmp_path, dest_path)  # atomic on Windows and Unix
-       except Exception as e:
-           logger.error("Atomic rename failed from %s to %s: %s", tmp_path, dest_path, e)
-           # Clean up temp file if move fails
-           try:
-               os.remove(tmp_path)
-           except Exception:
-               pass
-           raise
-       logger.info("Atomic move complete: %s -> %s", tmp_path, dest_path)
-   except Exception as e:
-       logger.error("Download failed, cleaning up temp file: %s", tmp_path)
-       try:
-           os.remove(tmp_path)
-       except Exception:
-           pass
-       raise
+    """
+    Download a file from the given URL to dest_path using atomic_write_file.
+    Ensures that incomplete downloads do not leave partial/corrupt files in the archive.
+    This is robust and cross-platform (Windows and Unix).
+    """
+    # Ensure requests is available; the script previously required requests
+    if requests is None:
+        raise RuntimeError("requests library is required to download files")
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    logger.info("Downloading %s -> %s (atomic write)", url, dest_path)
+    logger.debug("Download headers: %r", AGENT_HEADERS)
+    r = requests.get(url, stream=True, timeout=60, headers=AGENT_HEADERS)
+    logger.debug("HTTP status: %s", r.status_code)
+    logger.debug("HTTP response headers: %r", r.headers)
+    # Trace first 1024 bytes of content for debugging
+    first_bytes = b""
+    for chunk in r.iter_content(chunk_size=1024):
+        if chunk:
+            first_bytes += chunk
+            break
+    logger.debug("First 1024 bytes of response: %r", first_bytes)
+    r.raise_for_status()
+    # Write all content to file atomically
+    def content_generator():
+        yield first_bytes
+        for chunk in r.iter_content(chunk_size=8192):
+            if chunk:
+                yield chunk
+    # Use atomic_write_file with streaming writer for APK
+    def writer(f):
+        for chunk in content_generator():
+            f.write(chunk)
+    atomic_write_file(dest_path, writer, mode="wb")
 
 # Optional S3 upload (only if boto3 installed and env vars present)
 def maybe_upload_to_s3(local_path: str, s3_key: str) -> None:
@@ -471,11 +484,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             import tempfile, shutil
             if not metadata_exists:
                 try:
-                    logger.info(f"Metadata missing for app {app_id} version {version}, saving to {metadata_path}")
-                    tmp_fd, tmp_path = tempfile.mkstemp(prefix=metadata_filename + ".", suffix=".tmp", dir=APKS_DIR)
-                    with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                        json.dump(meta, f, indent=2, sort_keys=True)
-                    shutil.move(tmp_path, metadata_path)
+                    logger.info(f"Metadata missing for app {app_id} version {version}, saving to {metadata_path} (atomic write)")
+                    def writer(f):
+                        f.write(json.dumps(meta, indent=2, sort_keys=True).encode("utf-8"))
+                    atomic_write_file(metadata_path, writer, mode="wb")
                     logger.info(f"Metadata saved atomically to {metadata_path}")
                 except Exception as e:
                     logger.error(f"Failed to save metadata for app {app_id}: {e}")
@@ -493,7 +505,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 # Store the APK filename scheme and new metadata filename in the index
                 "apk_path": os.path.relpath(apk_path, PROJECT_ROOT),
                 "metadata_path": os.path.relpath(metadata_path, PROJECT_ROOT),
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                # Use timezone-aware UTC timestamp per Python 3.11+ deprecation of utcnow()
+                # This ensures ISO8601 format with explicit UTC indication ("Z")
+                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 "source_url": apk_url,
             }
             archived_versions.append(entry)
