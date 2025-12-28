@@ -379,11 +379,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     log_level = getattr(logging, args.log_level.upper(), DEFAULT_LOG_LEVEL)
     set_log_level(log_level)
 
-    # If --cron is set, remove StreamHandler(s) to stdout/stderr
+    # Handler logic for cron and non-cron modes
+    # In --cron mode, remove all StreamHandlers (stdout/stderr) but keep FileHandler
+    # In non-cron mode, both handlers are active
     if args.cron:
+        removed_stream = False
         for handler in list(logger.handlers):
-            if isinstance(handler, logging.StreamHandler):
+            # Only remove StreamHandlers, but never remove FileHandler
+            if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
                 logger.removeHandler(handler)
+                removed_stream = True
+        logger.info("[Handler] Running in --cron mode: StreamHandlers removed, only FileHandler remains.")
+        if not removed_stream:
+            logger.info("[Handler] No StreamHandlers found to remove in --cron mode.")
+    else:
+        logger.info("[Handler] Running in non-cron mode: Both StreamHandler and FileHandler are active.")
 
     cfg = load_config()
     app_ids = cfg.get("app_ids", DEFAULT_APP_IDS)
