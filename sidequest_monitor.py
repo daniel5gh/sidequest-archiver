@@ -368,11 +368,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Set log level for both stdout and file logging (default: INFO)"
     )
+    parser.add_argument(
+        "--cron",
+        action="store_true",
+        help="Cron mode: log only to file, not stdout/stderr (for use in cronjobs)"
+    )
     args = parser.parse_args(argv)
 
     # Set log level from CLI option
     log_level = getattr(logging, args.log_level.upper(), DEFAULT_LOG_LEVEL)
     set_log_level(log_level)
+
+    # If --cron is set, remove StreamHandler(s) to stdout/stderr
+    if args.cron:
+        for handler in list(logger.handlers):
+            if isinstance(handler, logging.StreamHandler):
+                logger.removeHandler(handler)
 
     cfg = load_config()
     app_ids = cfg.get("app_ids", DEFAULT_APP_IDS)
